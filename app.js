@@ -5,6 +5,33 @@ const defaultLabels = ['挨拶','話題1','話題2','話題3','まとめ'];
 const items = defaults.map((min,index)=>({id:index,min,sec:0,label:defaultLabels[index]||'',enabled:index<5}));
 let running=false,started=false,finished=false,base=0,origin=0,muted=true,audioContext=null,alertTimeout,noticeTimeout;
 const fired=new Set();
+const settingsKey='pace-timer-settings-v1';
+const validMinutes=value=>Number.isInteger(value)&&value>=0&&value<=999;
+const validSeconds=value=>Number.isInteger(value)&&value>=0&&value<=59;
+const escapeAttribute=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+function settingsNotice(message){const status=$('settings-save-status');if(status)status.textContent=message;}
+function loadSettings(){
+ try{
+  const raw=window.localStorage.getItem(settingsKey);
+  if(raw===null)return;
+  const saved=JSON.parse(raw);
+  if(saved.version!==1||typeof saved.muted!=='boolean'||!Array.isArray(saved.items)||saved.items.length!==items.length||!saved.items.some(item=>item?.enabled)||!saved.items.every(item=>item&&typeof item.enabled==='boolean'&&typeof item.label==='string'&&item.label.length<=40&&validMinutes(item.min)&&validSeconds(item.sec)&&(!item.enabled||item.min*60+item.sec>0)))throw new Error('Invalid settings');
+  saved.items.forEach((item,index)=>Object.assign(items[index],{min:item.min,sec:item.sec,label:item.label,enabled:item.enabled}));
+  muted=saved.muted;
+  settingsNotice('前回の設定を復元しました。変更すると自動保存します。');
+ }catch{
+  settingsNotice('保存された設定を読み込めませんでした。初期設定を表示しています。');
+ }
+}
+function saveSettings(){
+ try{
+  const savedItems=items.map(item=>({min:validMinutes(item.min)?item.min:defaults[item.id],sec:validSeconds(item.sec)?item.sec:0,label:item.label,enabled:item.enabled}));
+  window.localStorage.setItem(settingsKey,JSON.stringify({version:1,items:savedItems,muted}));
+  settingsNotice('設定を保存しました。次回もこのブラウザで使えます。');
+ }catch{
+  settingsNotice('このブラウザでは設定を保存できません。今の設定でタイマーは使えます。');
+ }
+}
 const elapsedNow=()=>base+(running?Math.max(0,Date.now()-origin):0);
 const secondsOf=item=>item.min*60+item.sec;
 const formatTime=seconds=>{seconds=Math.max(0,Math.floor(seconds));const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60),s=seconds%60;return(h?String(h).padStart(2,'0')+':':'')+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');};
@@ -18,10 +45,10 @@ function readSettings(){
  const proposed=items.map(item=>{const row=$('row-'+item.id);return {...item,enabled:row.querySelector('.enabled').checked,label:row.querySelector('.label-input').value,min:Number(row.querySelector('.minutes').value),sec:Number(row.querySelector('.seconds').value)};});
  for(const item of proposed.filter(x=>x.enabled)){const row=$('row-'+item.id);if(!row.querySelector('.minutes').value.trim()||!row.querySelector('.seconds').value.trim()||!Number.isInteger(item.min)||!Number.isInteger(item.sec)||item.min<0||item.min>999||item.sec<0||item.sec>59||secondsOf(item)===0){$('error').textContent='No. '+String(item.id+1).padStart(2,'0')+' の時間を確認してください。分は0〜999、秒は0〜59で、1秒以上に設定します。';return false;}}
  if(!proposed.some(x=>x.enabled)){$('error').textContent='少なくとも1個のお知らせを有効にしてください。';return false;}
- Object.assign(items,proposed);$('error').textContent='';return true;
+ Object.assign(items,proposed);$('error').textContent='';saveSettings();return true;
 }
 function renderRows(){
- $('rows').innerHTML=items.map(item=>'<div class="row" id="row-'+item.id+'"><input class="enabled" type="checkbox" '+(item.enabled?'checked':'')+' aria-label="お知らせ'+(item.id+1)+'を有効にする"><span class="row-number">'+String(item.id+1).padStart(2,'0')+'</span><input class="label-input" type="text" maxlength="40" value="'+item.label+'" placeholder="項目'+String(item.id+1).padStart(2,'0')+'" aria-label="お知らせ'+(item.id+1)+'の名前"><div class="time-inputs"><input class="minutes" type="number" inputmode="numeric" min="0" max="999" step="1" value="'+item.min+'" aria-label="お知らせ'+(item.id+1)+'の分"><span>分</span><input class="seconds" type="number" inputmode="numeric" min="0" max="59" step="1" value="0" aria-label="お知らせ'+(item.id+1)+'の秒"><span>秒</span></div></div>').join('');
+ $('rows').innerHTML=items.map(item=>'<div class="row" id="row-'+item.id+'"><input class="enabled" type="checkbox" '+(item.enabled?'checked':'')+' aria-label="お知らせ'+(item.id+1)+'を有効にする"><span class="row-number">'+String(item.id+1).padStart(2,'0')+'</span><input class="label-input" type="text" maxlength="40" value="'+escapeAttribute(item.label)+'" placeholder="項目'+String(item.id+1).padStart(2,'0')+'" aria-label="お知らせ'+(item.id+1)+'の名前"><div class="time-inputs"><input class="minutes" type="number" inputmode="numeric" min="0" max="999" step="1" value="'+item.min+'" aria-label="お知らせ'+(item.id+1)+'の分"><span>分</span><input class="seconds" type="number" inputmode="numeric" min="0" max="59" step="1" value="'+item.sec+'" aria-label="お知らせ'+(item.id+1)+'の秒"><span>秒</span></div></div>').join('');
  $('rows').addEventListener('input',()=>{if(!started){readSettings();render();}});
 }
 async function prepareAudio(){try{audioContext=audioContext||new(window.AudioContext||window.webkitAudioContext)();if(audioContext.state!=='running')await audioContext.resume();return audioContext.state==='running';}catch{return false;}}
@@ -48,14 +75,15 @@ function tick(){if(running){const seconds=elapsedNow()/1000,total=totalSeconds()
 function toggleTimer(){if(running){tick();base=elapsedNow();running=false;}else{if(finished)resetTimer();if(!started&&!readSettings())return;started=true;origin=Date.now();running=true;if(!muted)void prepareAudio();}render();}
 function resetTimer(){running=false;started=false;finished=false;base=0;origin=0;fired.clear();clearAlert();$('error').textContent='';render();}
 $('start').addEventListener('click',toggleTimer);$('reset').addEventListener('click',resetTimer);$('ack').addEventListener('click',clearAlert);
-$('sound').addEventListener('click',async()=>{if(muted){if(!await prepareAudio()){notice('音を有効にできませんでした。点滅でお知らせします。');return;}muted=false;}else{muted=true;if(audioContext)await audioContext.suspend();}$('sound').setAttribute('aria-pressed',String(muted));$('sound').querySelector('span').textContent=muted?'ミュート中':'音あり';$('sound').querySelector('svg').innerHTML=muted?'<path d="M11 5L6 9H3v6h3l5 4V5zM16 9l6 6m0-6l-6 6"/>':'<path d="M11 5L6 9H3v6h3l5 4V5zM15 8a6 6 0 010 8m3-11a10 10 0 010 14"/>';});
+function renderSound(){$('sound').setAttribute('aria-pressed',String(muted));$('sound').querySelector('span').textContent=muted?'ミュート中':'音あり';$('sound').querySelector('svg').innerHTML=muted?'<path d="M11 5L6 9H3v6h3l5 4V5zM16 9l6 6m0-6l-6 6"/>':'<path d="M11 5L6 9H3v6h3l5 4V5zM15 8a6 6 0 010 8m3-11a10 10 0 010 14"/>';}
+$('sound').addEventListener('click',async()=>{if(muted){if(!await prepareAudio()){notice('音を有効にできませんでした。点滅でお知らせします。');return;}muted=false;}else{muted=true;if(audioContext)await audioContext.suspend();}renderSound();saveSettings();});
 $('test').addEventListener('click',async()=>{if(!muted)await prepareAudio();showAlert([],true);});
 function toggleDisplayMode(){const expanded=document.body.classList.toggle('display-mode');$('fullscreen').querySelector('span').textContent=expanded?'設定に戻る':'表示を拡大';$('fullscreen').setAttribute('aria-pressed',String(expanded));window.scrollTo({top:0});}
 $('fullscreen').addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else if(document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen();else toggleDisplayMode();}catch{toggleDisplayMode();}});
 document.addEventListener('fullscreenchange',()=>{$('fullscreen').querySelector('span').textContent=document.fullscreenElement?'全画面を終了':'全画面';});
 document.addEventListener('keydown',event=>{if(event.code==='Space'&&!event.repeat&&!['INPUT','TEXTAREA','BUTTON','SELECT'].includes(document.activeElement?.tagName)&&!document.activeElement?.isContentEditable){event.preventDefault();toggleTimer();}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick();});
-renderRows();render();setInterval(tick,100);
+loadSettings();renderRows();renderSound();render();setInterval(tick,100);
 // The same state can be read by browser agents when WebMCP is supported.
 const modelContext=document.modelContext,lifecycle=new AbortController();
 if(modelContext?.registerTool){try{Promise.resolve(modelContext.registerTool({name:'read_timer_state',title:'タイマーの状態を確認',description:'Read the sequential presentation timer, total duration, elapsed time, remaining time and scheduled sections without changing the timer.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute(input){if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length)throw new Error('Expected an empty object.');return {running,finished,elapsedSeconds:Math.floor(elapsedNow()/1000),totalSeconds:totalSeconds(),remainingSeconds:Math.ceil(Math.max(0,totalSeconds()-elapsedNow()/1000)),muted,sections:schedule().map(item=>({number:item.id+1,durationSeconds:secondsOf(item),startSeconds:item.start,endSeconds:item.end,label:displayName(item),passed:fired.has(item.id)}))};}},{signal:lifecycle.signal})).catch(()=>{});}catch{}window.addEventListener('pagehide',event=>{if(!event.persisted)lifecycle.abort();});}
